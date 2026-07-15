@@ -82,11 +82,3 @@ StereoImager/
 The vectorscope (`VisualizerComponent`) uses a persistent density-grid accumulation technique with a fading dot-spray layer, rendered entirely via CPU software rasterization for consistent cross-platform appearance. It's capped at 30fps and automatically stops repainting during periods of silence to conserve CPU.
 
 The phase correlation meter (`PhaseCorrelationMeter`) computes real-time correlation between left/right channels and displays it via a bar meter, large numeric readout, and a rolling sparkline history.
-
-## License
-
-*(Add your license here — e.g., MIT, GPL, or proprietary)*
-
-## Author
-
-*(Add author/contact info here)*
