@@ -13,9 +13,6 @@ A stereo width/imaging audio plugin built with JUCE, featuring a real-time vecto
 - **Vectorscope** — real-time stereo field visualizer with persistent density trails
 - **Phase Correlation Meter** — live correlation readout with bar meter, numeric display, and history sparkline
 
-## Screenshots
-
-*(Add screenshots of the plugin UI here)*
 
 ## Requirements
 
