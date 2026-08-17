@@ -2,7 +2,16 @@
   ==============================================================================
     VisualizerComponent.cpp  –  Stereo Imager vectorscope
 
-    Colour scheme: black background, blue sphere/grid/labels, pink dot cloud.
+    Colour scheme: black background, blue sphere/grid/labels, cyan/white dot
+    cloud (previously magenta/pink).
+
+    Vectorscope shape: Ozone Imager 2-style "Polar Sample" fan. Each sample's
+    mid (L+R) component is folded to its absolute value before plotting, so
+    energy always radiates from the sphere's equator outward — mono content
+    collapses to a single vertical streak instead of tracing through the
+    center. The fold is plotted once per sample in the upper half and
+    mirrored into the lower half, so the full sphere stays filled (Ozone
+    itself only ever draws the upper half).
 
     Performance optimisations vs. original:
       1. Timer capped at 30fps (33ms) even when signal is active.
@@ -76,6 +85,12 @@ void VisualizerComponent::ensureImages()
 //  every pixel in the image.
 // ---------------------------------------------------------------------------
 // In fadeDotLayer, change the fill colour to transparent black:
+// INTERVIEW NOTE: multiplying every channel (including alpha) by a constant
+// keepFraction < 1 each call is literally the same "exponential decay" shape as
+// the release-stage math in the other plugin's envelope followers
+// (state *= releaseCoeff) — here it's applied per-pixel instead of per-audio-
+// sample, but it's the identical one-pole decay: repeated multiplication by a
+// constant < 1 produces a smooth exponential falloff over successive calls.
 static void fadeDotLayer(juce::Image& img, float keepFraction)
 {
     juce::Image::BitmapData bm(img, juce::Image::BitmapData::readWrite);
@@ -103,6 +118,14 @@ void VisualizerComponent::setAudioData(const std::vector<float>& left,
     leftChannelData  = left;
     rightChannelData = right;
 
+    // INTERVIEW NOTE: |L| + |R| (sum of absolute values) is a cheap, non-RMS
+    // "is anything happening" activity/silence detector — not a true peak
+    // measurement (that would be max(|L|,|R|) or magnitude sqrt(L^2+R^2)), just
+    // a fast proxy used purely to gate the render/repaint loop (see timerCallback
+    // below), where correctness doesn't matter much but avoiding extra sqrt/max
+    // calls on every 8th sample does. Stepping by 8 is another cheap-and-good-
+    // enough subsampling choice, same idea as the phase correlation meter's
+    // "step" stride — you don't need every sample to answer "is this silent."
     peakMagnitude = 0.0f;
     int n = (int)std::min(left.size(), right.size());
     for (int i = 0; i < n; i += 8)
@@ -138,6 +161,16 @@ void VisualizerComponent::copyAudioBuffer(const juce::AudioBuffer<float>& buffer
 }
 
 // ---------------------------------------------------------------------------
+// INTERVIEW NOTE: this is an adaptive-rendering pattern worth being able to
+// describe: rather than always rendering at a fixed rate, the component tracks
+// "how long has it been silent" (inactivityCounter) and progressively backs
+// off — first it keeps decaying the visual trails for a grace period (still
+// worth animating a fade-out), then once fully settled (>90 ticks ~= 3s at
+// 30fps) it stops calling repaint() altogether and just holds the last frame.
+// This is a real perf technique in DAW plugin UIs: painting is not free
+// (even 30fps redraws add up across many plugin instances open at once), so
+// only paying that cost while there's audio worth visualizing is a meaningful
+// CPU saving, especially with dozens of tracks/plugins open simultaneously.
 void VisualizerComponent::timerCallback()
 {
     const bool isActive = (peakMagnitude > 0.0001f);
@@ -229,46 +262,93 @@ void VisualizerComponent::buildAndRenderFrame()
     {
         juce::Graphics gDots(dotLayer);
 
+        // Helper: accumulate one plotted (x,y) offset from center into both
+        // the persistent density grid and the fresh dot layer. Called twice
+        // per sample below — once for the upper-half Ozone-style point, once
+        // for its lower-half mirror — so the two halves always stay perfect
+        // reflections of each other.
+        auto plotPoint = [&](float px, float py, juce::Colour colour)
+        {
+            // Map to density grid (64x64)
+            int gx = (int)((px + maxR) / (maxR * 2.0f) * (densityGridSize - 1));
+            int gy = (int)((py + maxR) / (maxR * 2.0f) * (densityGridSize - 1));
+            gx = juce::jlimit(0, densityGridSize - 1, gx);
+            gy = juce::jlimit(0, densityGridSize - 1, gy);
+
+            // INTERVIEW NOTE: this densityGrid is a "phosphor persistence"
+            // simulation, mimicking how an old CRT-based analog goniometer's
+            // phosphor coating glows brighter where the beam lingers and fades
+            // slowly over time — additive accumulation here (+0.08f, clamped to
+            // 1.0) plus the exponential decay applied once per frame elsewhere
+            // (*0.96f in buildAndRenderFrame, *0.85f during fade-out above) is
+            // exactly that: a 2D leaky integrator per grid cell.
+            densityGrid[gy][gx] = juce::jmin(1.0f, densityGrid[gy][gx] + 0.08f);
+
+            float sx = center.x + px;
+            float sy = center.y + py;
+            gDots.setColour(colour);
+            gDots.fillRect(sx - 0.5f, sy - 0.5f, 1.5f, 1.5f);
+        };
+
         for (size_t i = 0; i < dataSize; i += (size_t)step)
         {
             float L = leftCopy[i];
             float R = rightCopy[i];
 
-            float x = (R - L) * maxR * 0.5f;
-            float y = -(L + R) * maxR * 0.5f;
+            // INTERVIEW NOTE: this is a variant of the classic goniometer /
+            // vectorscope transform, adapted to match Ozone Imager 2's
+            // "Polar Sample" view:
+            //   side = (R - L) * scale   -> same SIDE (difference) component
+            //                                as a plain M/S goniometer
+            //   magY = |L + R| * scale   -> the MID (sum) component, but with
+            //                                the sign discarded
+            // A plain Lissajous/goniometer (signed mid, no abs) plots mono
+            // content (L == R) as a vertical line running through the WHOLE
+            // circle, because positive and negative half-cycles land on
+            // opposite sides of center — that was the old behaviour here.
+            // Taking the absolute value of mid instead folds the bottom half
+            // up into the top, so mono content collapses onto a single
+            // bright streak radiating from the equator upward — that fold is
+            // the entire trick behind Ozone's half-circle "fan" shape. Ozone
+            // only ever renders that folded result in the upper half; the
+            // two plotPoint() calls below draw the same folded point in the
+            // upper half AND its mirror (unfolded back down) in the lower
+            // half, so the full sphere stays filled front-to-back rather
+            // than only half of it.
+            float side = (R - L) * maxR * 0.5f;
+            float magY = std::abs(L + R) * maxR * 0.5f;
 
             // Soft clamp to sphere boundary
-            float dist = std::sqrt(x * x + y * y);
+            float dist = std::sqrt(side * side + magY * magY);
             if (dist > maxR * 0.97f)
             {
                 float s = (maxR * 0.97f) / dist;
-                x *= s;
-                y *= s;
+                side *= s;
+                magY *= s;
             }
 
-            // Map to density grid (64x64)
-            int gx = (int)((x + maxR) / (maxR * 2.0f) * (densityGridSize - 1));
-            int gy = (int)((y + maxR) / (maxR * 2.0f) * (densityGridSize - 1));
-            gx = juce::jlimit(0, densityGridSize - 1, gx);
-            gy = juce::jlimit(0, densityGridSize - 1, gy);
-
-            densityGrid[gy][gx] = juce::jmin(1.0f, densityGrid[gy][gx] + 0.08f);
-
-            float sx = center.x + x;
-            float sy = center.y + y;
-
             // Dot colour based on instantaneous amplitude
+            // (sqrt(L^2 + R^2) is the Euclidean magnitude of the (L,R) sample
+            // pair — a true per-sample vector magnitude, unlike the cheaper
+            // |L|+|R| proxy used for activity gating above.) Ramp switched to
+            // cyan/white to match Ozone Imager 2's monochrome-blue look
+            // (was magenta/pink).
             float amp = std::sqrt(L * L + R * R);
             juce::Colour dotColour;
             if (amp < 0.3f)
-                dotColour = juce::Colour(220, 80, 150).withAlpha(0.55f);
+                dotColour = juce::Colour(70, 170, 210).withAlpha(0.45f);
             else if (amp < 0.7f)
-                dotColour = juce::Colour(246, 134, 189).withAlpha(0.70f);
+                dotColour = juce::Colour(140, 215, 235).withAlpha(0.68f);
             else
-                dotColour = juce::Colours::white.withAlpha(0.88f);
+                dotColour = juce::Colour(225, 248, 255).withAlpha(0.90f);
 
-            gDots.setColour(dotColour);
-            gDots.fillRect(sx - 0.5f, sy - 0.5f, 1.5f, 1.5f);
+            // Plot once for the upper-half Ozone-style fan, once more for its
+            // mirror in the lower half. This doubles the per-frame fillRect()
+            // calls (up to ~512 instead of ~256), but each is a tiny
+            // 1.5x1.5px software rect fill, so it stays well within budget
+            // at 30fps.
+            plotPoint(side, -magY, dotColour);
+            plotPoint(side,  magY, dotColour);
         }
     }
 
@@ -322,37 +402,39 @@ void VisualizerComponent::buildAndRenderFrame()
 // ---------------------------------------------------------------------------
 juce::Colour VisualizerComponent::densityToColour(float d) const
 {
+    // Dark navy (sparse) -> cyan -> white-hot (dense), matching Ozone
+    // Imager 2's monochrome-blue "Polar Sample" glow (was magenta/pink).
     if (d < 0.15f)
     {
         float t = d / 0.15f;
-        return juce::Colour((uint8_t)(180),
-                             (uint8_t)(40 + 20 * t),
-                             (uint8_t)(120 + 20 * t))
-                   .withAlpha(0.30f + t * 0.25f);
+        return juce::Colour((uint8_t)(20 + 15 * t),
+                             (uint8_t)(70 + 30 * t),
+                             (uint8_t)(130 + 30 * t))
+                   .withAlpha(0.28f + t * 0.22f);
     }
     else if (d < 0.40f)
     {
         float t    = (d - 0.15f) / 0.25f;
-        uint8_t r  = (uint8_t)(200 + 30 * t);
-        uint8_t g  = (uint8_t)(60  + 40 * t);
-        uint8_t b  = (uint8_t)(140 + 30 * t);
-        return juce::Colour(r, g, b).withAlpha(0.50f + t * 0.20f);
+        uint8_t r  = (uint8_t)(35  + 45 * t);
+        uint8_t g  = (uint8_t)(100 + 65 * t);
+        uint8_t b  = (uint8_t)(160 + 45 * t);
+        return juce::Colour(r, g, b).withAlpha(0.50f + t * 0.18f);
     }
     else if (d < 0.70f)
     {
         float t    = (d - 0.40f) / 0.30f;
-        uint8_t r  = (uint8_t)(230 + 15 * t);
-        uint8_t g  = (uint8_t)(100 + 34 * t);
-        uint8_t b  = (uint8_t)(170 + 30 * t);
-        return juce::Colour(r, g, b).withAlpha(0.70f + t * 0.15f);
+        uint8_t r  = (uint8_t)(80  + 70 * t);
+        uint8_t g  = (uint8_t)(165 + 45 * t);
+        uint8_t b  = (uint8_t)(205 + 25 * t);
+        return juce::Colour(r, g, b).withAlpha(0.68f + t * 0.14f);
     }
     else
     {
         float t    = (d - 0.70f) / 0.30f;
-        uint8_t r  = (uint8_t)(245 + 10 * t);
-        uint8_t g  = (uint8_t)(134 + 80 * t);
-        uint8_t b  = (uint8_t)(189 + 55 * t);
-        return juce::Colour(r, g, b).withAlpha(0.85f + t * 0.15f);
+        uint8_t r  = (uint8_t)(150 + 100 * t);
+        uint8_t g  = (uint8_t)(210 + 45 * t);
+        uint8_t b  = (uint8_t)(230 + 25 * t);
+        return juce::Colour(r, g, b).withAlpha(0.82f + t * 0.18f);
     }
 }
 

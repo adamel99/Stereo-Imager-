@@ -2,8 +2,11 @@
   ==============================================================================
     VisualizerComponent.h  –  Stereo Imager vectorscope
 
-    Visual style: dot/particle accumulation with persistent density grid.
-    - Colour ramp: dark magenta (sparse) → pink → white-hot (dense)
+    Visual style: Ozone Imager 2-style "Polar Sample" fan (mid component
+    folded to its absolute value), mirrored top/bottom so the full sphere
+    stays filled, rendered as dot/particle accumulation on a persistent
+    density grid.
+    - Colour ramp: dark navy (sparse) → cyan → white-hot (dense)
     - Blue sphere body with dashed grid lines and L/R/C labels
     - All rendering is CPU software-rasterised (no OpenGL)
 

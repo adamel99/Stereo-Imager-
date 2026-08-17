@@ -251,24 +251,52 @@ void PhaseCorrelationMeter::timerCallback()
 }
 
 //==============================================================================
+// INTERVIEW NOTE: this is the classic phase/stereo correlation meter formula,
+// and it's a very common one to be asked to derive or explain:
+//
+//     correlation = sum(L[i] * R[i]) / (sqrt(sum(L[i]^2)) * sqrt(sum(R[i]^2)))
+//
+// That's the cosine of the angle between the L and R sample vectors in
+// N-dimensional space — i.e. this is exactly the Pearson correlation
+// coefficient formula (minus mean-subtraction, since audio signals are
+// typically already zero-mean over a large enough window) / cosine similarity.
+// Reading the result:
+//   +1.0 -> L and R are identical (fully mono-compatible, in phase)
+//    0.0 -> L and R are uncorrelated (e.g. independent stereo content)
+//   -1.0 -> L and R are perfect inverses (R = -L) — this is the classic
+//           "phase cancellation" case: summing to mono would produce silence.
+// This is the single most useful mono-compatibility diagnostic in mixing/
+// mastering, and the meter is essentially just this dot-product-based cosine
+// similarity computed on a rolling window and smoothed/plotted over time.
 float PhaseCorrelationMeter::calculatePhaseCorrelation()
 {
     if (leftChannelData.size() != rightChannelData.size() || leftChannelData.empty())
         return 0.0f;
 
+    // Sample-stride subsampling: computing this over every single sample in a
+    // large buffer is unnecessary — correlation is a statistical measure that
+    // converges with far fewer than the full sample count, so stepping by
+    // size/1000 caps the work at ~1000 sample pairs regardless of how large the
+    // buffer is, trading a small amount of statistical precision for O(1)-ish
+    // (bounded) CPU cost independent of buffer length.
     const size_t step = std::max<size_t>(leftChannelData.size() / 1000, 1);
     float sumProduct = 0.0f, sumLeft = 0.0f, sumRight = 0.0f;
 
     for (size_t i = 0; i < leftChannelData.size(); i += step)
     {
-        sumProduct += leftChannelData[i]  * rightChannelData[i];
-        sumLeft    += leftChannelData[i]  * leftChannelData[i];
-        sumRight   += rightChannelData[i] * rightChannelData[i];
+        sumProduct += leftChannelData[i]  * rightChannelData[i];   // dot product numerator
+        sumLeft    += leftChannelData[i]  * leftChannelData[i];    // |L|^2
+        sumRight   += rightChannelData[i] * rightChannelData[i];   // |R|^2
     }
 
+    // sqrt(sumLeft) * sqrt(sumRight) = |L| * |R| (vector magnitudes) — the
+    // denominator that normalizes the dot product into the [-1, +1] cosine range.
     const float denom = std::sqrt(sumLeft) * std::sqrt(sumRight);
     if (denom < 1e-10f)
-        return 0.0f;
+        return 0.0f;   // avoid divide-by-zero on silence (both vectors ~zero-length)
 
+    // jlimit here is a safety clamp for floating-point error — the math
+    // guarantees the result is in [-1, 1] analytically, but summation order and
+    // rounding can push it a hair outside that range in practice.
     return juce::jlimit(-1.0f, 1.0f, sumProduct / denom);
 }

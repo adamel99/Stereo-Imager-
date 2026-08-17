@@ -68,6 +68,19 @@ public:
     juce::AudioParameterFloat* getStereoSpreadParam()    const { return stereoSpread; }
 
     // Thread-safe method to get audio data for visualizer
+    // INTERVIEW NOTE: this is the UI-thread ("consumer") half of a producer/consumer
+    // handoff from processBlock (see the matching prepareToWrite in the .cpp).
+    // Worth flagging out loud in an interview: this mixes a LOCK-FREE juce::AbstractFifo
+    // (whose whole purpose is to avoid ever blocking the audio thread) with a
+    // juce::CriticalSection (a real OS mutex) taken on BOTH sides. That's a design
+    // smell — if you already have a correct lock-free index scheme from the FIFO,
+    // adding a mutex around the payload copy reintroduces exactly the audio-thread
+    // blocking risk the FIFO was meant to eliminate (priority inversion, glitches
+    // under lock contention). A more consistent design would either (a) drop the
+    // CriticalSection and rely purely on the FIFO's happens-before guarantees since
+    // each slot index is only touched by one writer/one reader at a time, or (b) drop
+    // the FIFO and use a triple-buffer/atomic-pointer-swap scheme instead. Good thing
+    // to mention as "I'd tighten this up" if asked to critique your own code.
     bool getAudioDataForVisualizer(std::vector<float>& leftData, std::vector<float>& rightData)
     {
         int start1, size1, start2, size2;
